@@ -1,0 +1,248 @@
+openapi: 3.1.0
+info:
+  title: Blurams web API (unofficial)
+  version: 1.0.0
+  description: >
+    Reverse-engineered description of the cloud API behind
+    https://client.blurams.com, as used by the ha-blurams integration.
+    Unofficial and subject to change without notice. See docs/api.md.
+
+
+    Request and response bodies are JSON documents encrypted with AES-256-CBC
+    (key: the hostname zero-padded to 32 bytes, IV: 16 zero bytes, PKCS#7
+    padding, base64-encoded). The schemas named `*Payload` and `*Result` describe
+    the **decrypted** content; the wire format is the `Encrypted*` envelope.
+servers:
+  - url: https://client.blurams.com/api
+security:
+  - sessionCookie: []
+paths:
+  /login:
+    post:
+      summary: Sign in
+      description: Returns session cookies on success. Requires a Cap CAPTCHA token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EncryptedRequest"
+            example:
+              __reqJSONStr: "r3ubZJIsMd1WxARraObzEDKOFow7YN+iOlV93lJXANUR7D73JXstojnbXRdxuCHscG++KsEex4r0axxo8CDuBruYdJR1U/Il+9ha3n5u+lE="
+      responses:
+        "200":
+          description: Encrypted result (decrypts to `ApiResult`). Sets session cookies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EncryptedResponse"
+  /device/list:
+    post:
+      summary: List the cameras on the account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EncryptedRequest"
+      responses:
+        "200":
+          description: Encrypted result (decrypts to `DeviceListResult`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EncryptedResponse"
+        "401":
+          description: Session expired.
+        "403":
+          description: Session expired.
+  /device/saveSetting:
+    post:
+      summary: Change a device setting (used for camera power)
+      description: >
+        Sent as a form, with a browser-like `Referer`
+        (`/api/device/innerLive?gTime=<epoch ms>`).
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - __reqJSONStr
+              properties:
+                __reqJSONStr:
+                  type: string
+                  description: Encrypted `SaveSettingPayload`.
+                _csrf_header:
+                  type: string
+                  description: Always sent empty.
+      responses:
+        "200":
+          description: "Encrypted or plain result; success is `success: true` or a success `code`."
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/EncryptedResponse"
+                  - $ref: "#/components/schemas/ApiResult"
+        "401":
+          description: Session expired.
+        "403":
+          description: Session expired.
+  /captcha/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        description: Cap endpoint, for example `challenge` or `redeem`.
+        schema:
+          type: string
+    get:
+      summary: Cap CAPTCHA endpoint
+      security: []
+      responses:
+        "200":
+          description: Cap response.
+    post:
+      summary: Cap CAPTCHA endpoint
+      security: []
+      responses:
+        "200":
+          description: Cap response. The widget must be version 0.1.51 or newer.
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: session
+      description: >
+        Session cookies set by `/login` (cookie names are not documented; send
+        all of them).
+  schemas:
+    EncryptedRequest:
+      type: object
+      required:
+        - __reqJSONStr
+      properties:
+        __reqJSONStr:
+          type: string
+          description: Base64 of the AES-256-CBC encrypted JSON payload.
+    EncryptedResponse:
+      type: object
+      required:
+        - __respJSONStr
+      properties:
+        __respJSONStr:
+          type: string
+          description: Base64 of the AES-256-CBC encrypted JSON result.
+    ApiResult:
+      type: object
+      description: Decrypted result envelope.
+      properties:
+        code:
+          description: "`0` or `200` (number or string) means success."
+          oneOf:
+            - type: integer
+            - type: string
+        msg:
+          type: string
+        success:
+          type: boolean
+        data:
+          type: object
+          additionalProperties: true
+    LoginPayload:
+      type: object
+      description: Decrypted content of the `/login` request.
+      required:
+        - email
+        - password
+        - captcha
+        - remberMe
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+          format: password
+        captcha:
+          type: string
+          description: Legacy image captcha; empty when `captchaVerifyParam` is used.
+        remberMe:
+          type: boolean
+          description: Spelled this way by the server.
+        captchaVerifyParam:
+          type: string
+          description: Token produced by the Cap widget.
+        path:
+          type: string
+          example: "/"
+          description: Present in browser captures; appears to be optional.
+    DeviceListPayload:
+      type: object
+      description: Decrypted content of the `/device/list` request.
+      properties:
+        update:
+          type: boolean
+          example: true
+    DeviceListResult:
+      allOf:
+        - $ref: "#/components/schemas/ApiResult"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                devicelist:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Device"
+    Device:
+      type: object
+      description: A camera. Only the fields used by the integration are listed.
+      additionalProperties: true
+      properties:
+        deviceid:
+          type: string
+        devicename:
+          type: string
+        cameraModelId:
+          type: string
+        serialNumber:
+          type: string
+        onlineStatus:
+          type: string
+          example: online
+        deviceStatus:
+          type: string
+          description: "`OffByManual` when switched off by the user."
+          example: "On"
+        thumbnailUrlList:
+          type: array
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+                description: Relative to https://client.blurams.com (may be absolute).
+    SaveSettingPayload:
+      type: object
+      description: Decrypted content of the `/device/saveSetting` request.
+      required:
+        - deviceId
+        - path
+        - element
+      properties:
+        deviceId:
+          type: string
+        path:
+          type: string
+          example: profile/general/status
+        element:
+          type: string
+          description: XML fragment holding the new value.
+          examples:
+            - "<status>On</status>"
+            - "<status>OffByManual</status>"

@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "captcha": {
+        "description": "A sign-in page has opened. Enter your Blurams credentials, complete the “I’m a human” check, and select Sign in."
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid authentication",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This Blurams account is already configured",
+      "cannot_connect": "Failed to connect",
+      "no_url": "Home Assistant has no URL your browser can reach. Set the internal or external URL under Settings > System > Network, then try again.",
+      "reauth_successful": "Re-authentication was successful",
+      "wrong_account": "The account you signed in with does not match the account being re-authenticated."
+    }
+  },
+  "entity": {
+    "switch": {
+      "power": {
+        "name": "Power"
+      }
+    }
+  }
+}
