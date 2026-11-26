@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -36,6 +36,9 @@ class BluramsCamera(BluramsEntity, Camera):
     """A camera provided by Blurams (thumbnail snapshots only)."""
 
     _attr_name = None
+    # Without this flag the frontend never starts the HLS player and only
+    # refreshes the still snapshot every 10s.
+    _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, coordinator: BluramsDataUpdateCoordinator, device_id: str) -> None:
         """Initialize a Blurams camera."""
@@ -47,11 +50,21 @@ class BluramsCamera(BluramsEntity, Camera):
     def available(self) -> bool:
         """Return whether the camera is online."""
         device = self.device_data
-        return (
-            super().available
-            and device is not None
-            and device.get("onlineStatus") == "online"
-        )
+        return super().available and device is not None and self._is_online
+
+    @property
+    def _is_online(self) -> bool:
+        """Return whether the cloud reports the camera as reachable."""
+        # Browser captures show both "online" and "available" for a reachable
+        # camera, so accept either.
+        return self.device_data.get("onlineStatus") in ("online", "available")
+
+    async def stream_source(self) -> str | None:
+        """Return the live FLV bridge URL for the stream integration."""
+        proxy = self.coordinator.flv_proxy
+        if proxy is None or not self._is_online:
+            return None
+        return proxy.url_for(self._device_id)
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -14,6 +15,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
 from .const import API_URL, HOSTNAME, WEB_URL
+from .live import LiveParams
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -199,6 +201,65 @@ class BluramsApi:
         if _is_auth_failure(result):
             raise BluramsInvalidAuth
         raise BluramsCannotConnect
+
+    async def async_get_live_params(self, device: dict[str, Any]) -> LiveParams:
+        """Fetch the live stream parameters for a device.
+
+        This mirrors the web player: it POSTs the live page form, and the
+        returned HTML embeds the one-time stream token, the relay server and
+        the player host that the WebSocket connects to.
+        """
+        device_id = device["deviceid"]
+        form = {
+            "deviceAddSource": device.get("deviceAddSource") or "",
+            "cloudDid": str(device.get("cloudDid") or ""),
+            "modelId": device.get("modelId") or "",
+            "shareid": str(device.get("shareid") or ""),
+            "did": str(device.get("did") or ""),
+            "deviceId": device_id,
+            "channelNo": "null",
+        }
+        referer = (
+            f"{WEB_URL}/device/live?deviceId={device_id}"
+            f"&did={form['did']}&shareid={form['shareid']}"
+            f"&modelId={form['modelId']}&cloudDid={form['cloudDid']}"
+        )
+        try:
+            async with self._session.post(
+                f"{API_URL}/device/innerLive",
+                params={"gTime": time.time_ns() // 1_000_000},
+                data=form,
+                headers={"Referer": referer},
+                cookies=self._cookies or {},
+                timeout=_REQUEST_TIMEOUT,
+            ) as response:
+                response.raise_for_status()
+                html = await response.text()
+        except ClientResponseError as err:
+            if err.status in (401, 403):
+                raise BluramsInvalidAuth from err
+            raise BluramsCannotConnect from err
+        except (ClientError, TimeoutError) as err:
+            raise BluramsCannotConnect from err
+
+        token = re.search(r"token\s*=\s*'([^']+)'", html)
+        player_server = re.search(r"html5PlayerServer\s*:\s*'([^']+)'", html)
+        relay_server = re.search(r"relayServer\s*:\s*'([^']*)'", html)
+        if not token or not player_server:
+            _LOGGER.debug(
+                "Blurams live page for %s did not contain stream parameters",
+                device_id,
+            )
+            raise BluramsCannotConnect("Live stream parameters not found")
+        host = urlparse(player_server.group(1)).hostname or ""
+        return LiveParams(
+            vrs_host=host,
+            token=token.group(1),
+            device_id=device_id,
+            product_key=str(device.get("productkey") or ""),
+            relay_server=relay_server.group(1) if relay_server else "",
+            has_audio=True,
+        )
 
     async def _async_request(self, endpoint: str, payload: dict[str, Any]) -> Any:
         """Send an encrypted API request and decode its response."""

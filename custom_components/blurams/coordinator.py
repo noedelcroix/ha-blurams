@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -16,6 +16,9 @@ from .const import DOMAIN, UPDATE_INTERVAL
 _LOGGER = logging.getLogger(__name__)
 
 type BluramsConfigEntry = ConfigEntry[BluramsDataUpdateCoordinator]
+
+if TYPE_CHECKING:
+    from .flv_proxy import FlvProxy
 
 
 class BluramsDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
@@ -35,6 +38,8 @@ class BluramsDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any
             update_interval=UPDATE_INTERVAL,
         )
         self.api = api
+        # Set by the integration setup; re-serves live video for the cameras.
+        self.flv_proxy: FlvProxy | None = None
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Fetch the devices, keyed by device id."""

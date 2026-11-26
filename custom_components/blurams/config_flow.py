@@ -21,7 +21,7 @@ class BluramsConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         """Initialize the flow."""
-        self._captcha_nonce: str | None = None
+        self._captcha_url: str | None = None
         self._auth_data: dict[str, Any] | None = None
 
     @override
@@ -43,7 +43,12 @@ class BluramsConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Complete the external CAPTCHA step."""
         if user_input is None:
-            return self.async_abort(reason="cannot_connect")
+            # The frontend polls the flow while the sign-in page is open.
+            # Keep showing the same external step instead of aborting, so the
+            # browser can still finish the sign-in.
+            if self._captcha_url is None:
+                return await self._async_show_captcha()
+            return self.async_external_step(step_id="captcha", url=self._captcha_url)
         self._auth_data = user_input
         return self.async_external_step_done(next_step_id="finish_auth")
 
@@ -78,9 +83,9 @@ class BluramsConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="no_url")
 
         async_register_views(self.hass)
-        self._captcha_nonce = secrets.token_urlsafe(32)
-        await async_create_captcha_session(self.hass, self.flow_id, self._captcha_nonce)
-        return self.async_external_step(
-            step_id="captcha",
-            url=f"{base_url}/api/blurams/auth/{self.flow_id}/{self._captcha_nonce}",
+        captcha_nonce = secrets.token_urlsafe(32)
+        await async_create_captcha_session(self.hass, self.flow_id, captcha_nonce)
+        self._captcha_url = (
+            f"{base_url}/api/blurams/auth/{self.flow_id}/{captcha_nonce}"
         )
+        return self.async_external_step(step_id="captcha", url=self._captcha_url)

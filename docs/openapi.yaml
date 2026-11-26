@@ -20,7 +20,7 @@ paths:
   /login:
     post:
       summary: Sign in
-      description: Returns session cookies on success. Requires a Cap CAPTCHA token.
+      description: Returns session cookies on success. Requires a captchaVerifyParam token from the Aliyun Captcha human check.
       security: []
       requestBody:
         required: true
@@ -53,6 +53,64 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EncryptedResponse"
+        "401":
+          description: Session expired.
+        "403":
+          description: Session expired.
+  /device/innerLive:
+    post:
+      summary: Live view page; its HTML embeds the stream token
+      description: >
+        Sent as a form with the session cookies and a browser-like `Referer`
+        (the live page, `/device/live?deviceId=...`). The response is the
+        player's HTML; its inline script contains `token`, `productKey`,
+        `relayServer` and `html5PlayerServer` for the live WebSocket
+        (`wss://<html5PlayerServer>/h5player/live`, protocol described in
+        `api.md`).
+      parameters:
+        - name: gTime
+          in: query
+          required: true
+          schema:
+            type: integer
+            description: Epoch milliseconds.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [deviceId]
+              properties:
+                deviceAddSource:
+                  type: string
+                cloudDid:
+                  type: string
+                  description: From `device/list` field `cloudDid`.
+                modelId:
+                  type: string
+                  description: From `device/list` field `modelId`.
+                shareid:
+                  type: string
+                did:
+                  type: string
+                  description: From `device/list` field `did`.
+                deviceId:
+                  type: string
+                  description: From `device/list` field `deviceid`.
+                channelNo:
+                  type: string
+                  description: The web player sends the literal string `null`.
+      responses:
+        "200":
+          description: >
+            The player's HTML page. Parse `token`, `productKey`, `relayServer`
+            and `html5PlayerServer` from its inline script; the one-time
+            stream token authenticates the live WebSocket.
+          content:
+            text/html:
+              schema:
+                type: string
         "401":
           description: Session expired.
         "403":
@@ -91,26 +149,49 @@ paths:
           description: Session expired.
         "403":
           description: Session expired.
-  /captcha/{path}:
-    parameters:
-      - name: path
-        in: path
-        required: true
-        description: Cap endpoint, for example `challenge` or `redeem`.
-        schema:
-          type: string
+  /aliyunCaptcha/config:
     get:
-      summary: Cap CAPTCHA endpoint
+      summary: Aliyun Captcha 2.0 configuration
+      description: >
+        Plain JSON with `enabled`, `configured`, `region`, `prefix` and
+        `sceneId`. The login page loads the AliyunCaptcha.js SDK with
+        `window.AliyunCaptchaConfig = {region, prefix}` and calls
+        `initAliyunCaptcha({SceneId, mode: "embed", ...})`. The widget talks to
+        `https://<prefix>.captcha-open-<region-suffix>.aliyuncs.com` (for
+        example `captcha-open-southeast.aliyuncs.com` for region `sgp`).
       security: []
       responses:
         "200":
-          description: Cap response.
-    post:
-      summary: Cap CAPTCHA endpoint
+          description: Captcha configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  configured:
+                    type: boolean
+                  region:
+                    type: string
+                    example: sgp
+                  prefix:
+                    type: string
+                    example: 1o8reb
+                  sceneId:
+                    type: string
+                    example: 5ugp4tzx
+  /captcha:
+    get:
+      summary: Legacy image captcha
+      description: >
+        Only used by the website when `GET /aliyunCaptcha/config` reports
+        `enabled: false`. The Cap endpoints that used to live under
+        `/captcha/{path}` now redirect to `/login`.
       security: []
       responses:
         "200":
-          description: Cap response. The widget must be version 0.1.51 or newer.
+          description: Image captcha response.
 components:
   securitySchemes:
     sessionCookie:

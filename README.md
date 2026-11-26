@@ -14,7 +14,8 @@ Custom integration that connects **Blurams cloud cameras** to Home Assistant.
 
 | Capability | Details |
 | --- | --- |
-| Camera snapshots | The latest thumbnail from the Blurams cloud (no live video stream yet) |
+| Camera snapshots | The latest thumbnail from the Blurams cloud |
+| Live video | HEVC live stream relayed through the Blurams cloud into Home Assistant's stream integration (HLS in the frontend); no audio |
 | Power switch | Turn each camera on or off |
 | Automatic updates | State is polled from the Blurams cloud every 60 seconds |
 | Auto-discovery | Cameras added to your Blurams account appear without reconfiguring |
@@ -26,7 +27,7 @@ For every camera on your account:
 
 | Entity | Platform | Notes |
 | --- | --- | --- |
-| `<camera name>` | `camera` | Unavailable while the camera is offline |
+| `<camera name>` | `camera` | Unavailable while the camera is offline; live video through the `stream` integration |
 | `<camera name> Power` | `switch` | Stays available when the camera is switched off |
 
 ## Requirements
@@ -69,7 +70,8 @@ prompt. Complete the same sign-in page again.
 - Your **password is never stored**. It is used once to sign in; only the Blurams
   session cookies are kept in the Home Assistant config entry.
 - Home Assistant communicates with `client.blurams.com`. The sign-in page also
-  loads the CAPTCHA widget from `cdn.jsdelivr.net` (a pinned version).
+  loads the CAPTCHA SDK (Aliyun Captcha) from `o.alicdn.com`, and the SDK talks
+  to `*.aliyuncs.com`.
 - The sign-in pages are temporary: each is valid for 10 minutes, tied to a
   single setup flow, and allows a limited number of attempts.
 
@@ -78,8 +80,10 @@ prompt. Complete the same sign-in page again.
 | Problem | Solution |
 | --- | --- |
 | "Home Assistant has no URL your browser can reach" | Set the internal or external URL under *Settings > System > Network*. |
-| The human check never appears or fails | Make sure your browser can reach `cdn.jsdelivr.net`, then retry. Check the browser console for blocked requests. |
+| The human check never appears or fails | Make sure your browser can reach `o.alicdn.com` and `*.aliyuncs.com`, then retry. Check the browser console for blocked requests. |
 | Camera shows as unavailable | The camera is offline in the Blurams cloud (for example after being switched off). |
+| Live stream does not play | Make sure the `stream` integration is enabled (it is by default on standard installs) and that nothing else on the host uses port 8765. Check the logs for `blurams` errors. |
+| Live stream hiccups about once a minute | Expected: the Blurams cloud caps each playback session; the integration reconnects automatically. |
 | Entities stopped updating | Re-authenticate when prompted, or check *Settings > System > Logs* for `blurams` errors. |
 
 To enable debug logs, add this to `configuration.yaml`:
@@ -92,7 +96,17 @@ logger:
 
 ## Known limitations
 
-- No live video stream or audio, only snapshots.
+- Live video is video-only: the cameras' G.711 audio track cannot be muxed by
+  Home Assistant's stream component.
+- The cameras stream HEVC (H.265). Home Assistant's HLS player plays it in
+  Safari and in browsers with HEVC support (Chrome/Edge with hardware HEVC
+  decoding enabled); other browsers show a black picture or fall back badly.
+- The live stream flows through the Blurams cloud relay (there is no local
+  RTSP on these cameras) and the cloud caps each playback session after
+  roughly a minute; the integration reconnects automatically, so a brief hiccup
+  is possible about once a minute.
+- While the stream bridge only listens on `127.0.0.1`, any process on the Home
+  Assistant host can open the stream URL.
 - Cloud polling: state changes can take up to a minute to appear.
 - Depends on Blurams' unofficial web API, which can change at any time.
 
@@ -105,15 +119,20 @@ Include your Home Assistant version and the relevant log lines (remove any perso
 ### Development notes
 
 - Protocol notes are in [`docs/api.md`](docs/api.md) and
-  [`docs/openapi.yaml`](docs/openapi.yaml). `tools/blurams_crypto.py` encrypts and
-  decrypts API payloads for debugging (`pip install cryptography`).
-- The CAPTCHA widget version is pinned in `custom_components/blurams/const.py`
-  (`CAP_WIDGET_URL`, version 0.1.51 or newer is required). To enforce
-  Subresource Integrity, put the hash of that exact file in `CAP_WIDGET_SRI`:
+  [`docs/openapi.yaml`](docs/openapi.yaml), including the live video WebSocket
+  (`h5player`). `tools/blurams_crypto.py` encrypts and decrypts API payloads
+  for debugging (`pip install cryptography`); live WebSocket payloads use the
+  separate `viWebsdkCrypto` key (see `live.py`).
+- The CAPTCHA SDK is Aliyun Captcha 2.0; its URL is pinned in
+  `custom_components/blurams/const.py` (`ALIYUN_SDK_URL`). Alibaba Cloud serves
+  it from an unversioned URL, so Subresource Integrity cannot be enforced as
+  safely as with a versioned file: if you add the hash of the current file to
+  `ALIYUN_SDK_SRI`, sign-in will fail whenever Alibaba Cloud updates the file
+  and the hash must be updated too.
 
   ```bash
-  curl -s https://cdn.jsdelivr.net/npm/@cap.js/widget@0.1.56 | openssl dgst -sha384 -binary | openssl base64 -A
-  # then: CAP_WIDGET_SRI = "sha384-<output>"
+  curl -s https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js | openssl dgst -sha384 -binary | openssl base64 -A
+  # then: ALIYUN_SDK_SRI = "sha384-<output>"
   ```
 - CI runs Hassfest, HACS validation and a Python syntax check on every push.
 - Release tags (`vX.Y.Z`) must match `version` in `manifest.json`.

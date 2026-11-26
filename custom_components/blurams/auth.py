@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 from http import HTTPStatus
 import logging
-import secrets
 from typing import Any
-from urllib.parse import urljoin
 
 from aiohttp import ClientError, ClientSession, ContentTypeError, CookieJar, web
 from yarl import URL
@@ -19,20 +17,20 @@ from homeassistant.data_entry_flow import FlowResultType, UnknownFlow
 
 from .api import BluramsApi, BluramsCannotConnect, BluramsInvalidAuth
 from .const import (
+    ALIYUN_API_SOURCE,
+    ALIYUN_SDK_SOURCE,
+    ALIYUN_SDK_SRI,
+    ALIYUN_SDK_URL,
     API_URL,
-    CAP_CDN_SOURCE,
-    CAP_WIDGET_SRI,
-    CAP_WIDGET_URL,
     CONF_BLURAMS_COOKIES,
     DOMAIN,
-    HOSTNAME,
     WEB_URL,
 )
 
 _LOGGER = logging.getLogger(__name__)
 _SESSION_TTL = 600
 _MAX_LOGIN_ATTEMPTS = 5
-_CAPTCHA_BASE = f"{API_URL}/captcha/"
+_CAPTCHA_CONFIG_URL = f"{API_URL}/aliyunCaptcha/config"
 
 
 class BluramsCaptchaSession:
@@ -65,7 +63,7 @@ def async_register_views(hass: HomeAssistant) -> None:
         return
 
     hass.http.register_view(BluramsCaptchaPageView(hass))
-    hass.http.register_view(BluramsCaptchaProxyView(hass))
+    hass.http.register_view(BluramsCaptchaConfigView(hass))
     hass.http.register_view(BluramsCaptchaScriptView())
 
     async def close_all_sessions(_event: Any) -> None:
@@ -118,32 +116,12 @@ def _captcha_error(message: str, status: HTTPStatus) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
-def build_captcha_url(path: str) -> str | None:
-    """Return the upstream CAPTCHA URL for a proxied path, or None if unsafe.
-
-    The proxy must only ever talk to the Blurams CAPTCHA endpoint. ``urljoin``
-    happily returns a different host when ``path`` is an absolute URL, so the
-    joined result is verified instead of trusting the input.
-    """
-    if path.startswith("/") or any(part in {".", ".."} for part in path.split("/")):
-        return None
-    url = urljoin(_CAPTCHA_BASE, path)
-    parsed = URL(url)
-    if (
-        parsed.scheme != "https"
-        or parsed.host != HOSTNAME
-        or not url.startswith(_CAPTCHA_BASE)
-    ):
-        return None
-    return url
-
-
-def build_login_page(flow_id: str, nonce: str, script_nonce: str) -> str:
+def build_login_page(flow_id: str, nonce: str) -> str:
     """Return the HTML of the sign-in page."""
-    captcha_endpoint = f"/api/blurams/captcha/{flow_id}/{nonce}/"
+    config_endpoint = f"/api/blurams/captcha-config/{flow_id}/{nonce}"
     auth_endpoint = f"/api/blurams/auth/{flow_id}/{nonce}"
     integrity = (
-        f' integrity="{CAP_WIDGET_SRI}" crossorigin="anonymous"' if CAP_WIDGET_SRI else ""
+        f' integrity="{ALIYUN_SDK_SRI}" crossorigin="anonymous"' if ALIYUN_SDK_SRI else ""
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -155,45 +133,50 @@ def build_login_page(flow_id: str, nonce: str, script_nonce: str) -> str:
     body {{ font: 16px system-ui, sans-serif; max-width: 28rem; margin: 3rem auto; padding: 0 1rem; }}
     label {{ display: block; margin: 1rem 0 .35rem; }}
     input {{ box-sizing: border-box; width: 100%; padding: .7rem; }}
+    #captcha-element {{ min-height: 4rem; margin-top: 1rem; }}
     button {{ margin-top: 1rem; padding: .7rem 1rem; }}
     #status {{ min-height: 1.5rem; }}
   </style>
-  <script type="module" src="{CAP_WIDGET_URL}"{integrity}></script>
+  <script src="{ALIYUN_SDK_URL}"{integrity} defer></script>
 </head>
 <body>
   <h1>Sign in to Blurams</h1>
   <p>Enter your Blurams credentials, complete the “I’m a human” check, then sign in.</p>
-  <form id="login-form" data-auth-endpoint="{auth_endpoint}">
+  <form id="login-form" data-config-endpoint="{config_endpoint}"
+    data-auth-endpoint="{auth_endpoint}">
     <label for="email">Email</label>
     <input id="email" name="email" type="email" autocomplete="username" required>
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password" required>
-    <cap-widget id="captcha" data-cap-api-endpoint="{captcha_endpoint}"
-      data-cap-lang="en" data-cap-hidden-field-name="captchaVerifyParam"></cap-widget>
+    <div id="captcha-element"></div>
     <button id="submit" type="submit" disabled>Sign in</button>
   </form>
   <p id="status" role="status" aria-live="polite"></p>
-  <script nonce="{script_nonce}">window.CAP_SCRIPT_NONCE = "{script_nonce}";</script>
   <script src="/blurams/captcha.js" defer></script>
 </body>
 </html>"""
 
 
-def build_csp(script_nonce: str) -> str:
+def build_csp() -> str:
     """Return the Content-Security-Policy of the sign-in page."""
     return (
         "default-src 'self'; "
         "base-uri 'self'; "
         "object-src 'none'; "
         "form-action 'self'; "
-        # Only the pinned Cap packages may load, not the whole CDN.
-        # 'unsafe-eval' is kept because the widget compiles WebAssembly; if you
-        # confirm the widget works without it, try 'wasm-unsafe-eval' instead.
-        f"script-src 'self' {CAP_CDN_SOURCE} 'nonce-{script_nonce}' 'unsafe-eval'; "
-        f"connect-src 'self' {CAP_CDN_SOURCE}; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; "
-        "font-src 'self' data:; "
+        # Only Aliyun's CDN may load scripts; the SDK also pulls helper
+        # scripts and stylesheets from the g. and x. alicdn.com subdomains.
+        # 'unsafe-inline' is needed because the SDK runs helper code in a
+        # srcdoc iframe, which cannot carry a nonce; 'unsafe-eval' is kept
+        # because the SDK may compile code at runtime.
+        f"script-src 'self' {ALIYUN_SDK_SOURCE} 'unsafe-inline' 'unsafe-eval'; "
+        # The widget talks to the Aliyun Captcha API of Blurams' region, e.g.
+        # https://<prefix>.captcha-open-southeast.aliyuncs.com for "sgp".
+        # The data: source is fetched by the SDK's fingerprinting script.
+        f"connect-src 'self' {ALIYUN_SDK_SOURCE} {ALIYUN_API_SOURCE} data:; "
+        f"style-src 'self' {ALIYUN_SDK_SOURCE} 'unsafe-inline'; "
+        f"img-src 'self' data: {ALIYUN_SDK_SOURCE} {ALIYUN_API_SOURCE}; "
+        f"font-src 'self' {ALIYUN_SDK_SOURCE} data:; "
         "worker-src 'self' blob:; "
         "frame-src 'self' blob:"
     )
@@ -218,12 +201,11 @@ class BluramsCaptchaPageView(HomeAssistantView):
                 "This authentication page has expired.", HTTPStatus.GONE
             )
 
-        script_nonce = secrets.token_urlsafe(16)
         return web.Response(
-            text=build_login_page(flow_id, nonce, script_nonce),
+            text=build_login_page(flow_id, nonce),
             content_type="text/html",
             headers={
-                "Content-Security-Policy": build_csp(script_nonce),
+                "Content-Security-Policy": build_csp(),
                 "Cache-Control": "no-store",
                 "Referrer-Policy": "no-referrer",
             },
@@ -319,11 +301,11 @@ class BluramsCaptchaPageView(HomeAssistantView):
         )
 
 
-class BluramsCaptchaProxyView(HomeAssistantView):
-    """Proxy CAPTCHA requests while keeping vendor cookies on the server."""
+class BluramsCaptchaConfigView(HomeAssistantView):
+    """Serve the Blurams CAPTCHA configuration to the sign-in page."""
 
-    url = "/api/blurams/captcha/{flow_id}/{nonce}/{path:.*}"
-    name = "api:blurams:captcha"
+    url = "/api/blurams/captcha-config/{flow_id}/{nonce}"
+    name = "api:blurams:captcha_config"
     requires_auth = False
 
     def __init__(self, hass: HomeAssistant) -> None:
@@ -331,60 +313,57 @@ class BluramsCaptchaProxyView(HomeAssistantView):
         self.hass = hass
 
     async def get(
-        self, request: web.Request, flow_id: str, nonce: str, path: str
+        self, request: web.Request, flow_id: str, nonce: str
     ) -> web.Response:
-        """Proxy a CAPTCHA GET request."""
-        return await self._async_proxy(request, flow_id, nonce, path)
-
-    async def post(
-        self, request: web.Request, flow_id: str, nonce: str, path: str
-    ) -> web.Response:
-        """Proxy a CAPTCHA POST request."""
-        return await self._async_proxy(request, flow_id, nonce, path)
-
-    async def _async_proxy(
-        self, request: web.Request, flow_id: str, nonce: str, path: str
-    ) -> web.Response:
-        """Forward a browser CAPTCHA request to Blurams."""
+        """Fetch the CAPTCHA configuration with the flow's session."""
         captcha_session = _sessions(self.hass).get(nonce)
         if captcha_session is None or captcha_session.flow_id != flow_id:
             return _captcha_error(
                 "This authentication page has expired.", HTTPStatus.GONE
             )
 
-        url = build_captcha_url(path)
-        if url is None:
-            return _captcha_error("Invalid CAPTCHA request.", HTTPStatus.BAD_REQUEST)
-
-        headers = {
-            "Origin": WEB_URL,
-            "Referer": f"{WEB_URL}/login",
-        }
-        if content_type := request.headers.get("Content-Type"):
-            headers["Content-Type"] = content_type
-        if accept := request.headers.get("Accept"):
-            headers["Accept"] = accept
-
+        # The request goes through the flow's own client so that the trace
+        # cookies Blurams sets end up in the same cookie jar as the login.
         try:
-            async with captcha_session.client.request(
-                request.method,
-                url,
-                params=request.query,
-                data=await request.read() if request.can_read_body else None,
-                headers=headers,
+            async with captcha_session.client.get(
+                _CAPTCHA_CONFIG_URL,
+                headers={
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Referer": f"{WEB_URL}/login",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
             ) as response:
-                body = await response.read()
-                return web.Response(
-                    body=body,
-                    status=response.status,
-                    content_type=response.content_type,
-                )
-        except ClientError:
-            _LOGGER.warning("Unable to proxy Blurams CAPTCHA request")
+                if response.status != HTTPStatus.OK:
+                    _LOGGER.warning(
+                        "Blurams CAPTCHA config request failed with status %s",
+                        response.status,
+                    )
+                    return _captcha_error(
+                        "Blurams did not return a CAPTCHA configuration.",
+                        HTTPStatus.BAD_GATEWAY,
+                    )
+                config = await response.json(content_type=None)
+        except (ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.warning("Unable to fetch Blurams CAPTCHA config: %s", err)
             return _captcha_error(
                 "Home Assistant could not reach Blurams CAPTCHA services.",
                 HTTPStatus.BAD_GATEWAY,
             )
+
+        if not isinstance(config, dict):
+            return _captcha_error(
+                "Blurams returned an unexpected CAPTCHA configuration.",
+                HTTPStatus.BAD_GATEWAY,
+            )
+        # Only forward the fields the sign-in page needs.
+        return web.json_response(
+            {
+                key: config[key]
+                for key in ("enabled", "configured", "region", "prefix", "sceneId")
+                if key in config
+            },
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 class BluramsCaptchaScriptView(HomeAssistantView):
@@ -405,33 +384,100 @@ class BluramsCaptchaScriptView(HomeAssistantView):
 
 _CAPTCHA_SCRIPT = """
 const form = document.querySelector("#login-form");
-const captcha = document.querySelector("#captcha");
+const captchaElement = document.querySelector("#captcha-element");
 const submit = document.querySelector("#submit");
 const status = document.querySelector("#status");
 let captchaToken = "";
+let captchaInstance = null;
+let captchaReady = false;
 
-captcha.addEventListener("solve", (event) => {
-  captchaToken = event.detail.token || "";
-  submit.disabled = !captchaToken;
-});
-captcha.addEventListener("reset", () => {
-  captchaToken = "";
+function setStatus(message) {
+  status.textContent = message;
+}
+
+async function loadCaptcha() {
+  captchaReady = false;
   submit.disabled = true;
-});
-captcha.addEventListener("error", (event) => {
+  setStatus("Loading the human check…");
+  try {
+    const response = await fetch(form.dataset.configEndpoint, {
+      headers: {Accept: "application/json"},
+    });
+    const config = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(config.error || "Could not load the human check.");
+    if (!config.enabled || !config.configured || !config.sceneId) {
+      throw new Error("Blurams does not currently offer its human check. Try again later.");
+    }
+    // The SDK reads the region and prefix from this global.
+    window.AliyunCaptchaConfig = {region: config.region, prefix: config.prefix};
+    if (!window.initAliyunCaptcha) {
+      throw new Error("The human check did not load. Disable content blockers and retry.");
+    }
+    window.initAliyunCaptcha({
+      SceneId: config.sceneId,
+      language: "en",
+      mode: "embed",
+      element: "#captcha-element",
+      button: "#submit",
+      delayBeforeSuccess: false,
+      success: (event) => {
+        captchaToken = typeof event === "string"
+          ? event
+          : (event && (event.captchaVerifyParam || event.CaptchaVerifyParam)) || "";
+        if (!captchaToken) {
+          setStatus("The human check did not complete. Please try again.");
+          return;
+        }
+        setStatus("Signing in to Blurams…");
+        form.requestSubmit();
+      },
+      fail: () => {
+        captchaToken = "";
+        setStatus("The human check was not completed. Please try again.");
+      },
+      getInstance: (instance) => {
+        captchaInstance = instance;
+        captchaReady = true;
+        submit.disabled = false;
+        setStatus("");
+      },
+      onError: (error) => {
+        captchaReady = false;
+        captchaToken = "";
+        submit.disabled = true;
+        console.error("Blurams human check error", error);
+        setStatus("The human check failed. Please reload this page and try again.");
+      },
+    });
+  } catch (error) {
+    submit.disabled = true;
+    setStatus(error.message || "The human check failed to load. Please reload and try again.");
+  }
+}
+
+async function resetCaptcha() {
   captchaToken = "";
+  captchaReady = false;
   submit.disabled = true;
-  const detail = event.detail || {};
-  status.textContent = detail.message
-    ? `The human check failed (${detail.code || "unknown"}): ${detail.message}`
-    : "The human check failed. Please complete it again.";
-});
+  if (captchaInstance && typeof captchaInstance.destroy === "function") {
+    try {
+      captchaInstance.destroy();
+    } catch (_) {
+      // The widget may already be gone; reload it regardless.
+    }
+  }
+  captchaInstance = null;
+  captchaElement.innerHTML = "";
+  await loadCaptcha();
+}
 
 form.addEventListener("submit", async (event) => {
+  // The Sign in button also triggers the human check; only sign in once the
+  // check has produced a token.
   event.preventDefault();
-  if (!captchaToken) return;
+  if (!captchaToken || !captchaReady) return;
   submit.disabled = true;
-  status.textContent = "Signing in to Blurams…";
+  setStatus("Signing in to Blurams…");
   try {
     const response = await fetch(form.dataset.authEndpoint, {
       method: "POST",
@@ -444,13 +490,13 @@ form.addEventListener("submit", async (event) => {
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Sign-in failed.");
-    status.textContent = "Blurams is connected. You can close this window.";
+    setStatus("Blurams is connected. You can close this window.");
     form.hidden = true;
   } catch (error) {
-    status.textContent = error.message || "Sign-in failed. Please try again.";
-    captchaToken = "";
-    submit.disabled = true;
-    captcha.reset();
+    setStatus(error.message || "Sign-in failed. Please try again.");
+    await resetCaptcha();
   }
 });
+
+loadCaptcha();
 """
